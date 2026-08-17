@@ -1,3 +1,4 @@
+import requests
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,7 +11,7 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 # Configuración de página de Streamlit
 st.set_page_config(
-    page_title="Crypto & Equity Predictive Assets Engine - v4",
+    page_title="Crypto & Equity Predictive Assets Engine - v6",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -59,28 +60,120 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -------------------------------------------------------------------
-# GENERADOR DE DATOS HISTÓRICOS Y SIMULADOS CON SHOCKS DE MERCADO (2026)
+# CONFIGURACIÓN DE ACTIVOS Y PERFILES DE VOLATILIDAD (Grounded 2026)
+# -------------------------------------------------------------------
+base_prices = {
+    # Criptomonedas
+    "BTC": 60000.0, "ETH": 3000.0, "SOL": 140.0, "ADA": 0.45, "XRP": 0.55, "DOGE": 0.15,
+    # Acciones de EE.UU.
+    "AAPL": 175.0, "TSLA": 180.0, "MSFT": 420.0, "NVDA": 850.0, "AMZN": 180.0, "SPY": 500.0, "QQQ": 440.0,
+    # ADRs de Argentina (en USD)
+    "GGAL": 28.0, "YPF": 20.0, "BMA": 50.0, "PAM": 45.0, "CEPU": 9.0, "TGS": 15.0,
+    # Materias Primas / Otros
+    "GOLD": 2000.0, "OIL": 75.0
+}
+
+# Perfil de Volatilidad Anualizada (Bitcoin madurando a ~38% en 2026)
+vols = {
+    "BTC": 0.38, "ETH": 0.45, "SOL": 0.55, "ADA": 0.60, "XRP": 0.50, "DOGE": 0.85,
+    "AAPL": 0.20, "TSLA": 0.40, "MSFT": 0.18, "NVDA": 0.45, "AMZN": 0.22, "SPY": 0.15, "QQQ": 0.18,
+    "GGAL": 0.48, "YPF": 0.50, "BMA": 0.46, "PAM": 0.42, "CEPU": 0.44, "TGS": 0.40,
+    "GOLD": 0.12, "OIL": 0.30
+}
+
+# Capitalización bursátil simulada en Millones USD para cálculo de Turnover Ratio
+mcaps = {
+    "BTC": 1500000, "ETH": 400000, "SOL": 65000, "ADA": 15000, "XRP": 30000, "DOGE": 25000,
+    "AAPL": 2800000, "TSLA": 600000, "MSFT": 3100000, "NVDA": 2200000, "AMZN": 1800000, "SPY": 500000, "QQQ": 350000,
+    "GGAL": 4200, "YPF": 8000, "BMA": 3200, "PAM": 3500, "CEPU": 1400, "TGS": 1800,
+    "GOLD": 15000000, "OIL": 2500000
+}
+
+asset_names = {
+    "BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana", "ADA": "Cardano", "XRP": "Ripple", "DOGE": "Dogecoin",
+    "AAPL": "Apple Inc.", "TSLA": "Tesla Inc.", "MSFT": "Microsoft Corp.", "NVDA": "NVIDIA Corp.", "AMZN": "Amazon.com Inc.", "SPY": "S&P 500 ETF (SPY)", "QQQ": "Nasdaq 100 ETF (QQQ)",
+    "GGAL": "Grupo Fin. Galicia S.A.", "YPF": "YPF Sociedad Anónima", "BMA": "Banco Macro S.A.", "PAM": "Pampa Energía S.A.", "CEPU": "Central Puerto S.A.", "TGS": "Transportadora Gas del Sur S.A.",
+    "GOLD": "Oro de Refugio", "OIL": "Petróleo Crudo WTI"
+}
+
+# -------------------------------------------------------------------
+# OBTENCIÓN DE DATOS EN TIEMPO REAL (APIs de Binance y Yahoo Finance)
+# -------------------------------------------------------------------
+def get_binance_live_prices():
+    """Obtiene precios en tiempo real para criptomonedas desde Binance"""
+    pairs = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "DOGE": "DOGEUSDT"}
+    prices = {}
+    try:
+        res = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=2)
+        res.raise_for_status()
+        ticker_data = res.json()
+        ticker_map = {item['symbol']: float(item['price']) for item in ticker_data if item['symbol'] in pairs.values()}
+        
+        for name, pair in pairs.items():
+            prices[name] = ticker_map.get(pair, None)
+        prices["Status"] = "Online (API de Binance)"
+    except Exception:
+        # Fallback offline
+        prices = {
+            "BTC": 63450.25, "ETH": 3125.80, "SOL": 142.15, "DOGE": 0.1425,
+            "Status": "Simulado (Fallo de conexión Binance)"
+        }
+    return prices
+
+def get_yahoo_live_prices():
+    """Obtiene precios en tiempo real para acciones de EE.UU. y ADRs Argentinos desde Yahoo Finance"""
+    tickers = ["AAPL", "TSLA", "NVDA", "SPY", "GGAL", "YPF", "BMA", "PAM"]
+    prices = {t: {"price": None, "pct": 0.0} for t in tickers}
+    try:
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={','.join(tickers)}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        res = requests.get(url, headers=headers, timeout=2.5)
+        res.raise_for_status()
+        data = res.json()
+        
+        quote_list = data.get('quoteResponse', {}).get('result', [])
+        for quote in quote_list:
+            t = quote.get('symbol')
+            if t in prices:
+                prices[t]["price"] = quote.get('regularMarketPrice')
+                prices[t]["pct"] = quote.get('regularMarketChangePercent', 0.0)
+        prices["Status"] = "Online (API de Yahoo Finance)"
+    except Exception:
+        # Fallback offline
+        simulated_vals = {
+            "AAPL": {"price": 178.45, "pct": 1.25},
+            "TSLA": {"price": 182.10, "pct": -2.40},
+            "NVDA": {"price": 862.30, "pct": 4.15},
+            "SPY": {"price": 508.40, "pct": 0.45},
+            "GGAL": {"price": 29.50, "pct": 3.80},
+            "YPF": {"price": 21.20, "pct": -0.85},
+            "BMA": {"price": 52.40, "pct": 1.50},
+            "PAM": {"price": 46.80, "pct": 2.10}
+        }
+        prices.update(simulated_vals)
+        prices["Status"] = "Simulado (Fallo de conexión Yahoo Finance)"
+    return prices
+
+# -------------------------------------------------------------------
+# GENERADOR DE DATOS HISTÓRICOS DE VELAS (SINTÉTICO COMPLETO)
 # -------------------------------------------------------------------
 @st.cache_data
-def generate_historical_data(days=180, shock_type="Ninguno (Mercado Normal)"):
+def generate_historical_data(asset, days=180, shock_type="Ninguno (Mercado Normal)"):
     np.random.seed(42)
     base_date = datetime.now() - timedelta(days=days)
     dates = [base_date + timedelta(days=i) for i in range(days)]
     
     # 1. Liquidez de la Fed (TGA y RRP en Miles de Millones $)
-    # Decrementos en TGA y RRP significan inyección de liquidez neta en el sistema.
-    # En un "Fed Liquidity Drain", simulamos que la Fed drena liquidez aumentando RRP/TGA.
     rrp = []
     tga = []
     curr_rrp = 500.0
     curr_tga = 750.0
     for i in range(days):
         if shock_type == "Drenaje de Liquidez Fed (Hawkish Shift)" and i >= days - 45:
-            # Subida repentina y violenta que absorbe liquidez del sistema
             curr_rrp += np.random.normal(6.0, 9.0)
             curr_tga += np.random.normal(5.0, 8.0)
         else:
-            curr_rrp += np.random.normal(-0.5, 5.0)  # Tendencia general a la baja
+            curr_rrp += np.random.normal(-0.5, 5.0)
             curr_tga += np.random.normal(-0.3, 6.0)
         rrp.append(max(10.0, curr_rrp))
         tga.append(max(10.0, curr_tga))
@@ -90,137 +183,91 @@ def generate_historical_data(days=180, shock_type="Ninguno (Mercado Normal)"):
         "Fed_RRP": rrp,
         "Fed_TGA": tga
     })
-    # Índice de Liquidez Neta de Arthur Hayes (Inversa de RRP + TGA)
     df_macro["Net_Liquidity_Index"] = 1500.0 - (df_macro["Fed_RRP"] + df_macro["Fed_TGA"])
     
-    # 2. Generación de precios correlacionados
-    sp500_price = 5000.0
-    btc_price = 60000.0
-    eth_price = 3000.0
-    doge_price = 0.15
-    gold_price = 2000.0
-    oil_price = 75.0
+    # 2. Generación de precios correlacionados específicamente para el activo
+    base_p = base_prices.get(asset, 100.0)
+    vol_p = vols.get(asset, 0.25)
     
-    prices = {
-        "SPY": [], "QQQ": [], "BTC": [], "ETH": [], "DOGE": [], "GOLD": [], "OIL": []
-    }
-    volumes = {k: [] for k in prices.keys()}
-    highs, lows, opens = {k: [] for k in prices.keys()}, {k: [] for k in prices.keys()}, {k: [] for k in prices.keys()}
-    
-    # Perfil de Volatilidad Anualizada en 2026 (BTC madurando a ~38%)
-    vols = {
-        "SPY": 0.15, "QQQ": 0.18, "BTC": 0.38, "ETH": 0.45, "DOGE": 0.85, "GOLD": 0.12, "OIL": 0.30
-    }
-    
-    # Incrementar la volatilidad bajo condiciones de shock generalizado
     if shock_type != "Ninguno (Mercado Normal)":
-        for k in vols.keys():
-            vols[k] *= 1.45 # Aumento del 45% en la volatilidad por stress test
+        vol_p *= 1.45 # Aumento de volatilidad por estrés
+        
+    price_series = []
+    opens = []
+    highs = []
+    lows = []
+    volumes = []
+    
+    curr_price = base_p
     
     for i in range(days):
-        # Factor común de liquidez
         liq_factor = (df_macro["Net_Liquidity_Index"].iloc[i] - df_macro["Net_Liquidity_Index"].mean()) / df_macro["Net_Liquidity_Index"].std()
         market_shock = np.random.normal(0, 1) + 0.1 * liq_factor
         
-        # Rendimientos base por activos
-        sp_ret = vols["SPY"] / np.sqrt(365) * market_shock + np.random.normal(0.0003, 0.005)
-        qqq_ret = vols["QQQ"] / np.sqrt(365) * (market_shock * 1.2 + np.random.normal(0.0004, 0.006))
-        btc_ret = vols["BTC"] / np.sqrt(365) * (market_shock * 0.85 + np.random.normal(0.0005, 0.012))
-        eth_ret = vols["ETH"] / np.sqrt(365) * (market_shock * 0.90 + np.random.normal(0.0006, 0.015))
-        doge_ret = vols["DOGE"] / np.sqrt(365) * (market_shock * 1.5 + np.random.normal(-0.0002, 0.035))
+        # Rendimiento diario
+        asset_ret = vol_p / np.sqrt(365) * market_shock + np.random.normal(0.0003, 0.005)
         
-        gold_ret = vols["GOLD"] / np.sqrt(365) * (-market_shock * 0.2 + np.random.normal(0.0002, 0.004))
-        oil_ret = vols["OIL"] / np.sqrt(365) * (market_shock * 0.4 + np.random.normal(0.0001, 0.010))
-        
-        # Aplicación de escenarios de Shock Técnico y Macroeconómico
+        # Shocks
         if i >= days - 45:
             if shock_type == "Drenaje de Liquidez Fed (Hawkish Shift)":
-                # Liquidez cayendo arrastra activos de riesgo, oro sirve de cobertura débil
-                sp_ret -= 0.0025
-                qqq_ret -= 0.0035
-                btc_ret -= 0.0070
-                eth_ret -= 0.0090
-                doge_ret -= 0.0180
-                gold_ret += 0.0006
+                asset_ret -= 0.005 if asset in ["BTC", "ETH", "SOL", "DOGE", "QQQ", "TSLA", "GGAL", "YPF"] else 0.001
             elif shock_type == "Pánico Social Extremo (FUD Masivo)":
-                # Criptomonedas de alta especulación sufren retail run
-                btc_ret -= 0.0040
-                eth_ret -= 0.0120
-                doge_ret -= 0.0280
+                if asset in ["DOGE", "SOL", "ADA", "XRP", "ETH"]:
+                    asset_ret -= 0.015
+                elif asset in ["BTC", "GGAL", "YPF"]:
+                    asset_ret -= 0.005
             elif shock_type == "Choque Geopolítico (Petróleo y Oro)":
-                # Oro y petróleo escalan por tensiones geopolíticas; renta variable sufre por inflación
-                oil_ret += 0.0180
-                gold_ret += 0.0090
-                sp_ret -= 0.0030
-                qqq_ret -= 0.0040
-                btc_ret -= 0.0015
-                
+                if asset == "OIL":
+                    asset_ret += 0.02
+                elif asset == "GOLD":
+                    asset_ret += 0.012
+                else:
+                    asset_ret -= 0.004 # Caída generalizada de la renta variable
+                    
         if i >= days - 15:
             if shock_type == "Capitulación Global ETF (Crypto Flash Crash)":
-                # Flash crash masivo en los últimos 15 días simulados
-                btc_ret -= 0.0280
-                eth_ret -= 0.0380
-                doge_ret -= 0.0550
-                sp_ret -= 0.0060
-                qqq_ret -= 0.0080
-                gold_ret += 0.0025 # Oro sube por fuerte demanda de refugio físico
+                asset_ret -= 0.03 if asset in ["BTC", "ETH", "SOL", "DOGE", "ADA", "XRP", "GGAL", "YPF", "TSLA"] else 0.008
                 
-        sp500_price *= (1 + sp_ret)
-        btc_price *= (1 + btc_ret)
-        eth_price *= (1 + eth_ret)
-        doge_price *= (1 + doge_ret)
-        gold_price *= (1 + gold_ret)
-        oil_price *= (1 + oil_ret)
+        curr_price *= (1 + asset_ret)
+        price_series.append(curr_price)
         
-        # Guardar cierres
-        prices["SPY"].append(sp500_price / 10.0) # Normalizado como ETF SPY
-        prices["QQQ"].append(sp500_price / 12.0) # Normalizado como ETF QQQ
-        prices["BTC"].append(btc_price)
-        prices["ETH"].append(eth_price)
-        prices["DOGE"].append(doge_price)
-        prices["GOLD"].append(gold_price)
-        prices["OIL"].append(oil_price)
+        # Construir vela diaria
+        ret_std = vol_p / np.sqrt(365)
+        o = curr_price * (1 + np.random.normal(0, ret_std * 0.3))
+        h = max(o, curr_price) * (1 + abs(np.random.normal(0, ret_std * 0.2)))
+        l = min(o, curr_price) * (1 - abs(np.random.normal(0, ret_std * 0.2)))
         
-        # Construir Velas (OHLC) y Volúmenes
-        for k in prices.keys():
-            close = prices[k][-1]
-            ret_std = vols[k] / np.sqrt(365)
-            o = close * (1 + np.random.normal(0, ret_std * 0.3))
-            h = max(o, close) * (1 + abs(np.random.normal(0, ret_std * 0.2)))
-            l = min(o, close) * (1 - abs(np.random.normal(0, ret_std * 0.2)))
+        opens.append(o)
+        highs.append(h)
+        lows.append(l)
+        
+        # Volúmenes en millones
+        base_v = mcaps.get(asset, 1000) * 0.01 # volumen estimado
+        vol_multiplier = 1.0
+        if shock_type == "Capitulación Global ETF (Crypto Flash Crash)" and i >= days - 15:
+            vol_multiplier = 3.5
+        elif shock_type == "Pánico Social Extremo (FUD Masivo)" and i >= days - 45:
+            vol_multiplier = 2.0
             
-            opens[k].append(o)
-            highs[k].append(h)
-            lows[k].append(l)
-            
-            # Volúmenes base en Millones
-            base_vol = {"SPY": 5000, "QQQ": 4000, "BTC": 25000, "ETH": 12000, "DOGE": 1500, "GOLD": 800, "OIL": 1200}
-            
-            # Multiplicadores de volumen por pánico o liquidaciones
-            vol_multiplier = 1.0
-            if shock_type == "Capitulación Global ETF (Crypto Flash Crash)" and i >= days - 15:
-                vol_multiplier = 3.8 # Volumen salvaje de capitulación
-            elif shock_type == "Pánico Social Extremo (FUD Masivo)" and i >= days - 45:
-                vol_multiplier = 2.2
-            elif shock_type == "Drenaje de Liquidez Fed (Hawkish Shift)" and i >= days - 45:
-                vol_multiplier = 1.6
-                
-            vol = base_vol[k] * (1 + np.random.normal(0.2, 0.4)) * (1 + abs(liq_factor) * 0.5) * vol_multiplier
-            volumes[k].append(max(base_vol[k] * 0.1, vol))
-            
-    # Sentimiento Social (Twitter vs TikTok)
+        v = base_v * (1 + np.random.normal(0.2, 0.4)) * (1 + abs(liq_factor) * 0.5) * vol_multiplier
+        volumes.append(max(0.1, v))
+        
+    df_all = pd.DataFrame({"Date": dates})
+    df_all["Fed_RRP"] = df_macro["Fed_RRP"]
+    df_all["Fed_TGA"] = df_macro["Fed_TGA"]
+    df_all["Net_Liquidity_Index"] = df_macro["Net_Liquidity_Index"]
+    
+    # Sentimiento de redes alineado
     twitter_sent = []
     tiktok_sent = []
     for i in range(days):
-        market_trend = (prices["BTC"][i] - prices["BTC"][max(0, i-5)]) / prices["BTC"][max(0, i-5)]
-        
+        market_trend = (price_series[i] - price_series[max(0, i-5)]) / price_series[max(0, i-5)] if price_series[max(0, i-5)] != 0 else 0
         tw = 5.0 + market_trend * 25.0 + np.random.normal(0, 1.2)
         tk = 5.0 + market_trend * 45.0 + np.random.normal(0, 2.5)
         
-        # Alterar el sentimiento de las redes si hay shock social
         if shock_type == "Pánico Social Extremo (FUD Masivo)" and i >= days - 45:
-            tw = np.random.normal(1.8, 0.7) # FUD total institucional
-            tk = np.random.normal(0.8, 0.4) # Capitulación absoluta en vídeo minorista
+            tw = np.random.normal(1.8, 0.7)
+            tk = np.random.normal(0.8, 0.4)
         elif shock_type == "Capitulación Global ETF (Crypto Flash Crash)" and i >= days - 15:
             tw = np.random.normal(1.2, 0.5)
             tk = np.random.normal(0.5, 0.3)
@@ -228,21 +275,166 @@ def generate_historical_data(days=180, shock_type="Ninguno (Mercado Normal)"):
         twitter_sent.append(clip(tw, 0.0, 10.0))
         tiktok_sent.append(clip(tk, 0.0, 10.0))
         
-    df_all = pd.DataFrame({"Date": dates})
-    df_all["Fed_RRP"] = df_macro["Fed_RRP"]
-    df_all["Fed_TGA"] = df_macro["Fed_TGA"]
-    df_all["Net_Liquidity_Index"] = df_macro["Net_Liquidity_Index"]
     df_all["Twitter_Sentiment"] = twitter_sent
     df_all["TikTok_Sentiment"] = tiktok_sent
+    df_all[f"{asset}_Open"] = opens
+    df_all[f"{asset}_High"] = highs
+    df_all[f"{asset}_Low"] = lows
+    df_all[f"{asset}_Close"] = price_series
+    df_all[f"{asset}_Volume_M"] = volumes
     
-    for k in prices.keys():
-        df_all[f"{k}_Close"] = prices[k]
-        df_all[f"{k}_Open"] = opens[k]
-        df_all[f"{k}_High"] = highs[k]
-        df_all[f"{k}_Low"] = lows[k]
-        df_all[f"{k}_Volume_M"] = volumes[k]
-        
     return df_all
+
+# -------------------------------------------------------------------
+# OBTENCIÓN HISTÓRICA COMPLETA DE VELAS DESDE APIS REALES
+# -------------------------------------------------------------------
+@st.cache_data(ttl=120)
+def fetch_binance_klines(asset, days=180, shock_type="Ninguno (Mercado Normal)"):
+    """Descarga velas diarias reales de Binance"""
+    pair = f"{asset}USDT"
+    url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval=1d&limit={days}"
+    try:
+        res = requests.get(url, timeout=3)
+        res.raise_for_status()
+        klines = res.json()
+        
+        dates, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+        for k in klines:
+            dates.append(datetime.fromtimestamp(k[0] / 1000.0))
+            opens.append(float(k[1]))
+            highs.append(float(k[2]))
+            lows.append(float(k[3]))
+            closes.append(float(k[4]))
+            volumes.append(float(k[5]) / 1e3) # Normalizar volumen
+            
+        df_res = pd.DataFrame({
+            "Date": dates,
+            f"{asset}_Open": opens,
+            f"{asset}_High": highs,
+            f"{asset}_Low": lows,
+            f"{asset}_Close": closes,
+            f"{asset}_Volume_M": volumes
+        })
+        
+        # Inyectar factores macro y sentimientos
+        df_sim = generate_historical_data(asset, days=len(dates), shock_type=shock_type)
+        df_res["Fed_RRP"] = df_sim["Fed_RRP"]
+        df_res["Fed_TGA"] = df_sim["Fed_TGA"]
+        df_res["Net_Liquidity_Index"] = df_sim["Net_Liquidity_Index"]
+        df_res["Twitter_Sentiment"] = df_sim["Twitter_Sentiment"]
+        df_res["TikTok_Sentiment"] = df_sim["TikTok_Sentiment"]
+        
+        # Aplicar distorsión de shock si es necesario
+        if shock_type != "Ninguno (Mercado Normal)":
+            for i in range(len(df_res)):
+                mult = 1.0
+                if i >= len(df_res) - 45:
+                    if shock_type == "Drenaje de Liquidez Fed (Hawkish Shift)":
+                        mult = 0.85
+                    elif shock_type == "Pánico Social Extremo (FUD Masivo)":
+                        mult = 0.70 if asset == "DOGE" else 0.88
+                    elif shock_type == "Choque Geopolítico (Petróleo y Oro)":
+                        mult = 0.95
+                if i >= len(df_res) - 15:
+                    if shock_type == "Capitulación Global ETF (Crypto Flash Crash)":
+                        mult = 0.68
+                df_res.loc[i, f"{asset}_Open"] *= mult
+                df_res.loc[i, f"{asset}_High"] *= mult
+                df_res.loc[i, f"{asset}_Low"] *= mult
+                df_res.loc[i, f"{asset}_Close"] *= mult
+                df_res.loc[i, f"{asset}_Volume_M"] *= (3.5 if shock_type == "Capitulación Global ETF (Crypto Flash Crash)" and i >= len(df_res) - 15 else 1.0)
+                
+        return df_res, "Binance API (Histórico)"
+    except Exception as e:
+        df_fallback = generate_historical_data(asset, days=days, shock_type=shock_type)
+        return df_fallback, f"Simulado (Fallback conexión: {str(e)[:40]}...)"
+
+@st.cache_data(ttl=120)
+def fetch_yahoo_klines(asset, days=180, shock_type="Ninguno (Mercado Normal)"):
+    """Descarga velas diarias reales de Yahoo Finance"""
+    # Aproximar rango
+    range_str = "6mo" if days <= 180 else "1y"
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{asset}?range={range_str}&interval=1d"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        res = requests.get(url, headers=headers, timeout=4)
+        res.raise_for_status()
+        data = res.json()
+        
+        result = data['chart']['result'][0]
+        timestamps = result['timestamp']
+        indicators = result['indicators']['quote'][0]
+        
+        dates, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+        for idx, ts in enumerate(timestamps):
+            o = indicators['open'][idx]
+            h = indicators['high'][idx]
+            l = indicators['low'][idx]
+            c = indicators['close'][idx]
+            v = indicators['volume'][idx]
+            
+            if o is not None and h is not None and l is not None and c is not None:
+                dates.append(datetime.fromtimestamp(ts))
+                opens.append(float(o))
+                highs.append(float(h))
+                lows.append(float(l))
+                closes.append(float(c))
+                volumes.append(float(v) / 1e6 if v is not None else 0.0)
+                
+        # Cortar rango
+        dates = dates[-days:]
+        opens = opens[-days:]
+        highs = highs[-days:]
+        lows = lows[-days:]
+        closes = closes[-days:]
+        volumes = volumes[-days:]
+        
+        df_res = pd.DataFrame({
+            "Date": dates,
+            f"{asset}_Open": opens,
+            f"{asset}_High": highs,
+            f"{asset}_Low": lows,
+            f"{asset}_Close": closes,
+            f"{asset}_Volume_M": volumes
+        })
+        
+        # Inyectar factores macro y sentimientos
+        df_sim = generate_historical_data(asset, days=len(dates), shock_type=shock_type)
+        df_res["Fed_RRP"] = df_sim["Fed_RRP"]
+        df_res["Fed_TGA"] = df_sim["Fed_TGA"]
+        df_res["Net_Liquidity_Index"] = df_sim["Net_Liquidity_Index"]
+        df_res["Twitter_Sentiment"] = df_sim["Twitter_Sentiment"]
+        df_res["TikTok_Sentiment"] = df_sim["TikTok_Sentiment"]
+        
+        # Aplicar distorsión de shock
+        if shock_type != "Ninguno (Mercado Normal)":
+            for i in range(len(df_res)):
+                mult = 1.0
+                if i >= len(df_res) - 45:
+                    if shock_type == "Drenaje de Liquidez Fed (Hawkish Shift)":
+                        mult = 0.88
+                    elif shock_type == "Pánico Social Extremo (FUD Masivo)":
+                        mult = 0.92
+                    elif shock_type == "Choque Geopolítico (Petróleo y Oro)":
+                        if asset == "GOLD":
+                            mult = 1.08
+                        elif asset == "OIL":
+                            mult = 1.15
+                        else:
+                            mult = 0.92
+                if i >= len(df_res) - 15:
+                    if shock_type == "Capitulación Global ETF (Crypto Flash Crash)":
+                        mult = 0.82
+                df_res.loc[i, f"{asset}_Open"] *= mult
+                df_res.loc[i, f"{asset}_High"] *= mult
+                df_res.loc[i, f"{asset}_Low"] *= mult
+                df_res.loc[i, f"{asset}_Close"] *= mult
+                df_res.loc[i, f"{asset}_Volume_M"] *= (1.8 if shock_type == "Capitulación Global ETF (Crypto Flash Crash)" and i >= len(df_res) - 15 else 1.0)
+                
+        return df_res, "Yahoo Finance (Histórico)"
+    except Exception as e:
+        df_fallback = generate_historical_data(asset, days=days, shock_type=shock_type)
+        return df_fallback, f"Simulado (Fallback conexión: {str(e)[:40]}...)"
 
 def clip(val, min_val, max_val):
     return max(min_val, min(val, max_val))
@@ -251,6 +443,10 @@ def clip(val, min_val, max_val):
 # PANEL LATERAL Y CONFIGURACIÓN DEL ENTORNO
 # -------------------------------------------------------------------
 st.sidebar.title("🛠️ Configuración de Motor")
+
+# Selector de Origen de Datos
+st.sidebar.subheader("🔌 Origen de Datos")
+data_mode = st.sidebar.radio("Modo de Origen de Datos:", ["Simulado (Offline)", "Conexión Real-Time APIs (Online)"])
 
 # Selector de Shock de Mercado (Stress Testing)
 st.sidebar.subheader("🚨 Simulación de Shocks (Stress Test)")
@@ -262,30 +458,39 @@ shock_type = st.sidebar.selectbox("Selecciona un Escenario de Shock:", [
     "Capitulación Global ETF (Crypto Flash Crash)"
 ])
 
-st.sidebar.subheader("Sleeves de Activos")
-sleeve = st.sidebar.selectbox("Selecciona un Grupo de Activos:", [
-    "Oro 2.0 (Bitcoin)",
-    "Altcoins (Ethereum, Dogecoin)",
-    "ETFs de Renta Variable (SPY, QQQ)",
-    "Materias Primas & Refugios (Gold, Oil)"
+# Selector Tipo de Activo
+st.sidebar.subheader("📁 Categoría de Mercado")
+asset_class = st.sidebar.selectbox("Selecciona la Categoría:", [
+    "Criptomonedas (Binance)",
+    "Renta Variable EE.UU. (Yahoo Finance)",
+    "Acciones Argentinas (Yahoo Finance)",
+    "Materias Primas & Refugios (Yahoo Finance)"
 ])
 
-# Mapear sleeve a los activos específicos correspondientes
-if sleeve == "Oro 2.0 (Bitcoin)":
-    active_assets = ["BTC"]
-elif sleeve == "Altcoins (Ethereum, Dogecoin)":
-    active_assets = ["ETH", "DOGE"]
-elif sleeve == "ETFs de Renta Variable (SPY, QQQ)":
-    active_assets = ["SPY", "QQQ"]
+# Mapeo de categoría a opciones disponibles
+if asset_class == "Criptomonedas (Binance)":
+    assets_avail = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"]
+elif asset_class == "Renta Variable EE.UU. (Yahoo Finance)":
+    assets_avail = ["AAPL", "TSLA", "MSFT", "NVDA", "AMZN", "SPY", "QQQ"]
+elif asset_class == "Acciones Argentinas (Yahoo Finance)":
+    assets_avail = ["GGAL", "YPF", "BMA", "PAM", "CEPU", "TGS"]
 else:
-    active_assets = ["GOLD", "OIL"]
+    assets_avail = ["GOLD", "OIL"]
 
-selected_asset = st.sidebar.selectbox("Activo Activo de Análisis:", active_assets)
+selected_asset = st.sidebar.selectbox("Activo a Analizar:", assets_avail, format_func=lambda x: f"{x} - {asset_names.get(x, '')}")
 
-# Cargar datos históricos modificados dinámicamente por el shock_type
-df = generate_historical_data(shock_type=shock_type)
+# Carga Inteligente de datos según Origen y Categoría
+data_source_label = "Simulado (Offline)"
+if data_mode == "Conexión Real-Time APIs (Online)":
+    if asset_class == "Criptomonedas (Binance)":
+        df, data_source_label = fetch_binance_klines(selected_asset, days=180, shock_type=shock_type)
+    else:
+        df, data_source_label = fetch_yahoo_klines(selected_asset, days=180, shock_type=shock_type)
+else:
+    df = generate_historical_data(selected_asset, days=180, shock_type=shock_type)
+    data_source_label = "Simulado (Offline)"
 
-# Configuración del backtester en la barra lateral
+# Configuración del backtester
 st.sidebar.subheader("📈 Backtesting de Portafolio")
 initial_capital = st.sidebar.number_input("Capital Inicial ($)", value=10000, step=1000)
 slippage_fee = st.sidebar.slider("Comisiones & Slippage por Trade (%)", 0.0, 1.0, 0.1, step=0.05) / 100.0
@@ -293,7 +498,7 @@ slippage_fee = st.sidebar.slider("Comisiones & Slippage por Trade (%)", 0.0, 1.0
 st.sidebar.markdown("""
 ---
 **Acerca del Motor de Predicción:**
-Esta aplicación implementa un sistema híbrido que integra análisis técnico con modelos de procesamiento de lenguaje natural y factores macro. Basado en los últimos descubrimientos del reporte de 2026.
+Esta aplicación implementa un sistema híbrido que integra análisis técnico de confluencia con modelos de procesamiento de lenguaje natural y factores de liquidez macro. Basado en el reporte de 2026.
 """)
 
 # -------------------------------------------------------------------
@@ -303,18 +508,17 @@ def calculate_support_resistance(df, asset):
     close_series = df[f"{asset}_Close"]
     high_series = df[f"{asset}_High"]
     low_series = df[f"{asset}_Low"]
-    
-    # Calcular niveles utilizando máximos/mínimos locales simples
     support = low_series.rolling(window=20).min().iloc[-1]
     resistance = high_series.rolling(window=20).max().iloc[-1]
     return support, resistance
 
 def detect_candlestick_patterns(df, asset):
-    # Últimas 3 velas para análisis de patrones
     last_idx = -1
-    o, h, l, c = df[f"{asset}_Open"].iloc[last_idx], df[f"{asset}_High"].iloc[last_idx], df[f"{asset}_Low"].iloc[last_idx], df[f"{asset}_Close"].iloc[last_idx]
+    o = df[f"{asset}_Open"].iloc[last_idx]
+    h = df[f"{asset}_High"].iloc[last_idx]
+    l = df[f"{asset}_Low"].iloc[last_idx]
+    c = df[f"{asset}_Close"].iloc[last_idx]
     
-    # Atributos de vela única
     body_size = abs(c - o)
     candle_range = h - l if h - l != 0 else 0.001
     upper_wick = h - max(o, c)
@@ -323,21 +527,20 @@ def detect_candlestick_patterns(df, asset):
     is_bearish = c < o
     
     pattern = "Neutral"
-    bias = 0.0 # -1 para Bearish fuerte, 1 para Bullish fuerte, 0 para neutral
+    bias = 0.0
     
-    # Martillo (Hammer) / Pin Bar Bullish
+    # Hammer
     if (lower_wick > 2 * body_size) and (upper_wick < 0.1 * candle_range):
         pattern = "Bullish Hammer / Pin Bar"
         bias = 0.6
-        
-    # Hombre Colgado (Hanging Man) / Pin Bar Bearish
+    # Hanging Man / Shooting Star
     elif (upper_wick > 2 * body_size) and (lower_wick < 0.1 * candle_range):
         pattern = "Bearish Shooting Star / Hanging Man"
         bias = -0.6
         
-    # Engolfamiento (Engulfing)
     prev_o, prev_c = df[f"{asset}_Open"].iloc[last_idx-1], df[f"{asset}_Close"].iloc[last_idx-1]
     
+    # Engulfing
     if (is_bullish) and (prev_c < prev_o) and (c > prev_o) and (o < prev_c):
         pattern = "Bullish Engulfing"
         bias = 0.8
@@ -355,24 +558,21 @@ def check_technical_confluence(df, asset):
     avg_vol = df[f"{asset}_Volume_M"].rolling(window=20).mean().iloc[-1]
     
     confluence_triggered = False
-    confluence_score = 0.0 # [-1, 1]
+    confluence_score = 0.0
     
-    # Validamos patrón con Volumen y Niveles Clave
     near_support = abs(last_close - sup) / last_close < 0.02
     near_resistance = abs(last_close - res) / last_close < 0.02
     vol_expansion = last_vol > 1.2 * avg_vol
     
     if bias > 0 and near_support and vol_expansion:
         confluence_triggered = True
-        confluence_score = bias * 1.2 # Amplificación por confluencia
+        confluence_score = bias * 1.2
     elif bias < 0 and near_resistance and vol_expansion:
         confluence_triggered = True
         confluence_score = bias * 1.2
     else:
-        # Si no hay confluencia de volumen o soportes, reducimos el peso del patrón
         confluence_score = bias * 0.4
         
-    # Clampar score entre -1.0 y 1.0
     confluence_score = clip(confluence_score, -1.0, 1.0)
     return pattern, confluence_triggered, confluence_score
 
@@ -380,27 +580,21 @@ def check_technical_confluence(df, asset):
 # METRICAS DE CAPITALIZACIÓN Y GIRO (TURNOVER)
 # -------------------------------------------------------------------
 def get_turnover_ratio(df, asset):
-    # Ratio Volumen a Capitalización de Mercado (Turnover)
-    mcaps = {
-        "BTC": 1500000, "ETH": 400000, "DOGE": 25000, 
-        "SPY": 500000, "QQQ": 350000, "GOLD": 15000000, "OIL": 2500000
-    } # En Millones $
-    
     last_vol = df[f"{asset}_Volume_M"].iloc[-1]
-    mcap = mcaps[asset]
+    mcap = mcaps.get(asset, 1000)
     ratio = (last_vol / mcap) * 100.0
     
     if ratio < 0.5:
         desc = "Giro Bajo (Low Turnover) - Posible falta de confirmación de tendencia o spreads amplios."
         status = "Warning"
     elif ratio <= 3.0:
-        desc = "Giro Normal - Interés institucional estándar y flujos saludables."
+        desc = "Giro Normal - Interés institucional estándar y flujos de liquidez saludables."
         status = "Healthy"
     elif ratio <= 12.0:
-        desc = "Giro Activo (Active Repricing) - Fuerte interés y volumen que confirma rotación de precio."
+        desc = "Giro Activo (Active Repricing) - Fuerte volumen que respalda y confirma rotación de precio."
         status = "Strong"
     else:
-        desc = "Mercado Muy Caliente (Speculative Hot Spot) - Cuidado con sobrecompra, alta volatilidad o manipulación."
+        desc = "Mercado Muy Caliente (Speculative Hot Spot) - Cuidado con sobrecompra, pánico minorista o manipulación."
         status = "Hot"
         
     return ratio, desc, status
@@ -409,22 +603,21 @@ def get_turnover_ratio(df, asset):
 # MOTOR DE SENTIMIENTO MULTIMODAL Y ML (ESTILO STANFORD)
 # -------------------------------------------------------------------
 def calculate_multimodal_sentiment(df, asset):
-    # En base al estudio de la Universidad de Auckland, combinamos Twitter (largo plazo) y TikTok (especulativo corto plazo)
     last_tw = df["Twitter_Sentiment"].iloc[-1]
     last_tk = df["TikTok_Sentiment"].iloc[-1]
     
-    if asset == "DOGE":
+    if asset in ["DOGE", "SOL", "ADA", "XRP"]:
+        # TikTok domina en altcoins de alta especulación minorista
         combined_score = (0.35 * last_tw + 0.65 * last_tk)
-    elif asset in ["BTC", "GOLD", "SPY"]:
+    elif asset in ["BTC", "GOLD", "SPY", "QQQ", "MSFT", "AAPL"]:
+        # Twitter y dinámica institucional de mediano-largo plazo domina
         combined_score = (0.75 * last_tw + 0.25 * last_tk)
     else:
         combined_score = (0.55 * last_tw + 0.45 * last_tk)
         
-    return combined_score / 10.0 # Normalizado a escala [0, 1]
+    return combined_score / 10.0
 
 def run_stanford_predictive_model(df, asset):
-    # Estilo Stanford: En lugar de analizar sentimiento polarizado, entrenamos un clasificador
-    # con variables de texto (aquí representadas por series de sentimiento) etiquetadas con el retorno futuro (+1D)
     df_ml = df.copy()
     df_ml["Target"] = (df_ml[f"{asset}_Close"].shift(-1) > df_ml[f"{asset}_Close"]).astype(int)
     
@@ -455,12 +648,11 @@ def run_stanford_predictive_model(df, asset):
     return prob_up, model.coef_[0][0]
 
 # -------------------------------------------------------------------
-# MOTOR DE TRADING COMBINADO (MACD, ETS & FORECASTING)
+# MOTOR DE TRADING COMBINADO (MACD, ETS & BACKTESTING)
 # -------------------------------------------------------------------
 def calculate_signals_and_backtest(df, asset, init_cap, fee):
     df_bt = df.copy()
     
-    # 1. Dual MACD (Filtro Técnico)
     k_short = df_bt[f"{asset}_Close"].ewm(span=12, adjust=False).mean()
     d_short = df_bt[f"{asset}_Close"].ewm(span=26, adjust=False).mean()
     macd_short = k_short - d_short
@@ -476,7 +668,6 @@ def calculate_signals_and_backtest(df, asset, init_cap, fee):
     df_bt["MACD_Long"] = macd_long
     df_bt["MACD_Signal_Long"] = signal_long
     
-    # 2. Generar Señal Combinada (I_t) diaria
     signals = []
     positions = []
     cash = init_cap
@@ -490,40 +681,32 @@ def calculate_signals_and_backtest(df, asset, init_cap, fee):
             positions.append(0)
             continue
             
-        # Sentimiento normalizado remapeado a [-0.5, 0.5]
         sent_combined = calculate_multimodal_sentiment(df_bt.iloc[:i+1], asset) - 0.5
-        
-        # Confluencia Técnica remapeada a [-0.5, 0.5]
         _, _, tech_score = check_technical_confluence(df_bt.iloc[:i+1], asset)
         tech_score = tech_score * 0.5
         
-        # Filtro de Liquidez Macro: Retorno del Índice de Liquidez en 5 días
         liq_index = df_bt["Net_Liquidity_Index"].iloc[i]
         prev_liq = df_bt["Net_Liquidity_Index"].iloc[max(0, i-5)]
         liq_signal = 0.5 if liq_index > prev_liq else -0.5
         
-        # Señal unificada I_t en el rango [-1, 1]
         raw_it = sent_combined * 0.4 + tech_score * 0.4 + liq_signal * 0.2
         it_signal = clip(raw_it * 2.0, -1.0, 1.0)
         signals.append(it_signal)
         
-        # Ejecución técnica de Dual MACD
         bullish_macd = (macd_short.iloc[i] > signal_short.iloc[i]) and (macd_long.iloc[i] > signal_long.iloc[i])
         bearish_macd = (macd_short.iloc[i] < signal_short.iloc[i]) and (macd_long.iloc[i] < signal_long.iloc[i])
         
-        # Lógica del Trading Algorithm
         price = df_bt[f"{asset}_Close"].iloc[i]
         current_pos = positions[-1] if len(positions) > 0 else 0
         
-        # Filtro de confirmación de señales con umbrales
         if it_signal > 0.25 and bullish_macd and current_pos == 0:
             holdings = (cash * (1.0 - fee)) / price
             cash = 0.0
-            positions.append(1) # Long
+            positions.append(1)
         elif (it_signal < -0.25 or bearish_macd) and current_pos == 1:
             cash = holdings * price * (1.0 - fee)
             holdings = 0.0
-            positions.append(0) # Cash
+            positions.append(0)
         else:
             positions.append(current_pos)
             
@@ -533,8 +716,6 @@ def calculate_signals_and_backtest(df, asset, init_cap, fee):
     df_bt["Signal_It"] = signals
     df_bt["Position"] = positions
     df_bt["Portfolio_Value"] = portfolio_value
-    
-    # Estrategia de Buy & Hold para comparación
     df_bt["BH_Value"] = (df_bt[f"{asset}_Close"] / df_bt[f"{asset}_Close"].iloc[30]) * init_cap
     df_bt.loc[:30, "BH_Value"] = init_cap
     
@@ -546,21 +727,21 @@ df_results = calculate_signals_and_backtest(df, selected_asset, initial_capital,
 # -------------------------------------------------------------------
 # RENDERIZADO DE LA INTERFAZ DE USUARIO (UI)
 # -------------------------------------------------------------------
-st.title("⚡ Crypto & Equity Assets Predictive Engine - v4")
-st.markdown("### Modelador Predictivo y Plataforma de Stress Testing Multimodal")
+st.title("⚡ Crypto & Equity Assets Predictive Engine - v6")
+st.markdown(f"### Modelador Predictivo y Plataforma de Stress Testing Multiactivos | Origen: <span style='color:#00ffcc;'>{data_source_label}</span>", unsafe_allow_html=True)
 
-# Alerta visible si hay un entorno de stress testing activo
+# Alerta de Stress Testing
 if shock_type != "Ninguno (Mercado Normal)":
     st.markdown(f"""
     <div style="background-color: #3b0d11; border: 2px solid #ff3333; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
         <h4 style="color: #ff3333; margin: 0; font-weight: 700;">🚨 ENTORNO DE STRESS TESTING ACTIVO: {shock_type.upper()}</h4>
         <p style="color: #f7a8a8; margin: 5px 0 0 0; font-size: 14px;">
-            Se están simulando choques en el sistema de datos. Las volatilidades aumentaron un 45% y las series históricas de liquidez, precios y sentimientos sociales reflejan distorsiones extremas. Compara cómo el algoritmo híbrido busca preservar capital frente a la caída del mercado.
+            Simulando perturbaciones graves en el sistema. Las volatilidades aumentaron un 45% y las series de datos reflejan correcciones severas.
         </p>
     </div>
     """, unsafe_allow_html=True)
 
-# Secciones de Métricas de Encabezado
+# Métricas de Encabezado
 col1, col2, col3, col4 = st.columns(4)
 
 with col1:
@@ -569,7 +750,7 @@ with col1:
     pct_change = ((last_price - prev_price) / prev_price) * 100
     st.markdown(f"""
     <div class="metric-card">
-        <div class="metric-title">Precio Actual ({selected_asset})</div>
+        <div class="metric-title">Precio de Cierre ({selected_asset})</div>
         <div class="metric-value">${last_price:,.2f}</div>
         <div class="metric-delta" style="color: {'#00ffcc' if pct_change >= 0 else '#ff4d4d'};">
             {'▲' if pct_change >= 0 else '▼'} {pct_change:.2f}% (24h)
@@ -614,7 +795,6 @@ with col4:
     </div>
     """, unsafe_allow_html=True)
 
-
 # TABS PRINCIPALES DE LA APP
 tab1, tab2, tab3, tab4 = st.tabs([
     "📈 Panel de Control de Activos", 
@@ -627,9 +807,69 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: PANEL DE CONTROL DE ACTIVOS
 # -------------------------------------------------------------------
 with tab1:
-    st.subheader("Análisis de Tendencias y Perfiles de Volatilidad")
+    st.subheader("Cuadro de Precios Globales en Tiempo Real (APIs Conectadas)")
     
-    # Gráfico de Precios Clásico con Velas
+    # Obtener precios en tiempo real para crypto y acciones
+    binance_live = get_binance_live_prices()
+    yahoo_live = get_yahoo_live_prices()
+    
+    col_live1, col_live2, col_live3, col_live4 = st.columns(4)
+    with col_live1:
+        st.markdown(f"""
+        <div style='background-color:#141722; padding:15px; border-radius:8px; border: 1px solid #2d3748;'>
+            <span style='color:#a0aec0; font-size:12px;'>🔥 CRIPTOS (Binance)</span>
+            <div style='margin-top: 5px;'>
+                <b style='color:#00ffcc;'>BTC:</b> ${binance_live['BTC']:,.2f}<br>
+                <b style='color:#00ffcc;'>ETH:</b> ${binance_live['ETH']:,.2f}<br>
+                <b style='color:#00ffcc;'>SOL:</b> ${binance_live['SOL']:,.2f}<br>
+                <b style='color:#00ffcc;'>DOGE:</b> ${binance_live['DOGE']:,.4f}
+            </div>
+            <span style='color:#8a9bb4; font-size:10px; display:block; margin-top:5px;'>{binance_live['Status']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_live2:
+        st.markdown(f"""
+        <div style='background-color:#141722; padding:15px; border-radius:8px; border: 1px solid #2d3748;'>
+            <span style='color:#a0aec0; font-size:12px;'>🇺🇸 ACCIONES EE.UU. (YFinance)</span>
+            <div style='margin-top: 5px;'>
+                <b style='color:#00bbff;'>AAPL:</b> ${yahoo_live['AAPL']['price']:,.2f} ({yahoo_live['AAPL']['pct']:+.2f}%)<br>
+                <b style='color:#00bbff;'>TSLA:</b> ${yahoo_live['TSLA']['price']:,.2f} ({yahoo_live['TSLA']['pct']:+.2f}%)<br>
+                <b style='color:#00bbff;'>NVDA:</b> ${yahoo_live['NVDA']['price']:,.2f} ({yahoo_live['NVDA']['pct']:+.2f}%)<br>
+                <b style='color:#00bbff;'>SPY:</b> ${yahoo_live['SPY']['price']:,.2f} ({yahoo_live['SPY']['pct']:+.2f}%)
+            </div>
+            <span style='color:#8a9bb4; font-size:10px; display:block; margin-top:5px;'>{yahoo_live['Status']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_live3:
+        st.markdown(f"""
+        <div style='background-color:#141722; padding:15px; border-radius:8px; border: 1px solid #2d3748;'>
+            <span style='color:#a0aec0; font-size:12px;'>🇦🇷 ADRs ARGENTINA (YFinance)</span>
+            <div style='margin-top: 5px;'>
+                <b style='color:#ff9900;'>GGAL:</b> ${yahoo_live['GGAL']['price']:,.2f} ({yahoo_live['GGAL']['pct']:+.2f}%)<br>
+                <b style='color:#ff9900;'>YPF:</b> ${yahoo_live['YPF']['price']:,.2f} ({yahoo_live['YPF']['pct']:+.2f}%)<br>
+                <b style='color:#ff9900;'>BMA:</b> ${yahoo_live['BMA']['price']:,.2f} ({yahoo_live['BMA']['pct']:+.2f}%)<br>
+                <b style='color:#ff9900;'>PAM:</b> ${yahoo_live['PAM']['price']:,.2f} ({yahoo_live['PAM']['pct']:+.2f}%)
+            </div>
+            <span style='color:#8a9bb4; font-size:10px; display:block; margin-top:5px;'>{yahoo_live['Status']}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_live4:
+        st.markdown(f"""
+        <div style='background-color:#141722; padding:15px; border-radius:8px; border: 1px solid #2d3748;'>
+            <span style='color:#a0aec0; font-size:12px;'>⚡ ACTIVO SELECCIONADO</span>
+            <h3 style='color:#ffffff; margin:5px 0;'>{selected_asset}</h3>
+            <span style='color:#00ffcc; font-size:13px; font-weight:700;'>{asset_names.get(selected_asset, '')}</span>
+            <span style='color:#8a9bb4; font-size:11px; display:block; margin-top:5px;'>Categoría: {asset_class}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.subheader("Análisis de Tendencias y Velas Japonesas")
+    
+    # Gráfico de Velas de Plotly
     fig_candles = go.Figure(data=[go.Candlestick(
         x=df_results["Date"],
         open=df_results[f"{selected_asset}_Open"],
@@ -644,37 +884,35 @@ with tab1:
     fig_candles.add_hline(y=res, line_dash="dash", line_color="#ff4d4d", annotation_text=f"Resistencia Local: ${res:,.2f}")
     
     fig_candles.update_layout(
-        title=f"Evolución y Velas Japonesas de {selected_asset} | Escenario: {shock_type}",
+        title=f"Evolución y Velas Japonesas de {selected_asset} | Modo: {data_source_label}",
         template="plotly_dark",
         xaxis_rangeslider_visible=False,
         height=450
     )
     st.plotly_chart(fig_candles, use_container_width=True)
     
-    st.info(f"💡 **Interpretación del Giro Técnico**: {turn_desc}")
+    st.info(f"💡 **Filtro de Giro Técnico**: {turn_desc}")
 
 # -------------------------------------------------------------------
-# TAB 2: CENTRO PREDICTIVO (ML & HOLT-WINTERS)
+# TAB 2: CENTRO PREDICTIVO
 # -------------------------------------------------------------------
 with tab2:
-    st.subheader("Proyecciones de Modelos Cuantitativos Avanzados")
+    st.subheader("Modelado Cuantitativo y Proyecciones Predictivas")
     
-    # 1. Ajuste de Holt-Winters (ETS)
+    # Suavizado Exponencial Holt-Winters
     close_data = df_results[f"{selected_asset}_Close"].values
     ets_model = ExponentialSmoothing(close_data, seasonal="add", seasonal_periods=7, trend="add").fit()
     forecast_days = 15
     ets_forecast = ets_model.forecast(forecast_days)
     
-    # Construcción de fechas futuras para graficar
     future_dates = [df_results["Date"].iloc[-1] + timedelta(days=i) for i in range(1, forecast_days + 1)]
     
-    # Graficar Ajuste y Predicción en Plotly
     fig_pred = go.Figure()
-    fig_pred.add_scatter(x=df_results["Date"].iloc[-30:], y=df_results[f"{selected_asset}_Close"].iloc[-30:], name="Histórico (Últimos 30 días)", line_color="#8a9bb4")
-    fig_pred.add_scatter(x=future_dates, y=ets_forecast, name="Pronóstico ETS (Holt-Winters) - 15D", line=dict(color="#00ffcc", width=3, dash="dash"))
+    fig_pred.add_scatter(x=df_results["Date"].iloc[-30:], y=df_results[f"{selected_asset}_Close"].iloc[-30:], name="Histórico (30 D)", line_color="#8a9bb4")
+    fig_pred.add_scatter(x=future_dates, y=ets_forecast, name="Pronóstico Holt-Winters (15D)", line=dict(color="#00ffcc", width=3, dash="dash"))
     
     fig_pred.update_layout(
-        title=f"Predicción del Modelo ETS para {selected_asset} (Bajo {shock_type})",
+        title=f"Ajuste y Pronóstico Holt-Winters para {selected_asset}",
         template="plotly_dark",
         height=400
     )
@@ -684,120 +922,99 @@ with tab2:
     with col_a:
         st.markdown(f"""
         ### 🧠 Explicación del Modelo Stanford ML
-        El clasificador predictivo **Stanford-Style** de esta sección se salta la subjetividad de etiquetar textos como 'positivos' o 'negativos'. 
-        
-        En su lugar, entrena una **Regresión Logística L2** correlacionando el historial combinado de flujos de sentimiento social y liquidez directamente con la dirección del precio del activo del día de mañana (+1D).
+        Este clasificador predictivo está modelado de acuerdo con la metodología de **Stanford University (CS229)**. En lugar de limitarse a calcular la polaridad del sentimiento de las redes, el modelo se entrena asociando directamente las características del sentimiento y el índice macro con el movimiento de precio real futuro de 24 horas (+1D de subida o bajada).
         
         *   **Probabilidad de Mañana:** {prob_up*100:.2f}% de probabilidad de cierre alcista.
-        *   **Dirección Predicha:** {"**COMPRA / ALCISTA**" if prob_up > 0.52 else "**VENTA / BAJISTA**" if prob_up < 0.48 else "**NEUTRAL / CONSOLIDACIÓN**"}
+        *   **Indicador de Dirección:** {"**COMPRA / ALCISTA**" if prob_up > 0.52 else "**VENTA / BAJISTA**" if prob_up < 0.48 else "**NEUTRAL / CONSOLIDACIÓN**"}
         """)
     with col_b:
         st.markdown(f"""
-        ### 📉 Gestión del Perfil de Volatilidad (Maturación de 2026)
-        Tradicionalmente, las criptomonedas han operado en mercados altamente fragmentados de volatilidad salvaje. Sin embargo, en el año de análisis **2026**, la entrada masiva de capital institucional y los ETFs al contado han provocado una **compresión masiva de volatilidad**.
-        
-        *   **Volatilidad de BTC en 2026:** Estabilizada originalmente cerca del **38% anualizado** (mínimo histórico de una década).
-        *   **Implicación bajo stress test:** En este escenario de *{shock_type}*, las desviaciones se disparan y las correlaciones se estrechan. Observa cómo el modelo de trading gesiona este estrés temporal.
+        ### 📉 Gestión del Perfil de Volatilidad
+        *   **Volatilidad Histórica Simulada/Real de {selected_asset}:** {(vols.get(selected_asset, 0.25)*100):.1f}% anualizada.
+        *   **Nota de Mercado (2026):** Los perfiles de volatilidad de Bitcoin (~38%) y Ethereum (~45%) se han estabilizado significativamente respecto de la década pasada, asemejándose cada vez más a las acciones de crecimiento del Nasdaq (como QQQ o NVDA) debido al flujo masivo de capital institucional de los ETFs al contado.
         """)
 
 # -------------------------------------------------------------------
-# TAB 3: SENTIMIENTO MULTIMODAL Y LIQUIDEZ FED
+# TAB 3: SENTIMIENTO MULTIMODAL & MACRO LIQUIDEZ
 # -------------------------------------------------------------------
 with tab3:
-    st.subheader("Análisis Cualitativo y Flujos de Inyección de Liquidez")
+    st.subheader("Análisis de Sentimiento de Redes y Liquidez de la Fed")
     
-    # Gráfico Dual: Sentimiento Multimodal (Twitter vs TikTok)
     fig_sent = go.Figure()
     fig_sent.add_scatter(x=df_results["Date"], y=df_results["Twitter_Sentiment"], name="Twitter/X (Señal Institucional - Texto)", line_color="#1DA1F2")
     fig_sent.add_scatter(x=df_results["Date"], y=df_results["TikTok_Sentiment"], name="TikTok (Señal Especulativa Retail - Vídeo)", line_color="#EE1D52")
     
     fig_sent.update_layout(
-        title=f"Fusión del Sentimiento Multimodal Cross-Platform | Escenario: {shock_type}",
+        title="Fusión del Sentimiento Multimodal Cross-Platform",
         template="plotly_dark",
         height=350,
         yaxis_title="Escala de Sentimiento (0-10)"
     )
     st.plotly_chart(fig_sent, use_container_width=True)
     
-    # Gráfico de Liquidez Fed
     fig_liq = go.Figure()
     fig_liq.add_scatter(x=df_results["Date"], y=df_results["Net_Liquidity_Index"], name="Índice de Liquidez Neta (Fed)", line_color="#00ffcc", fill="tozeroy")
     
     fig_liq.update_layout(
-        title="Inyección Macro de Liquidez Neta (Inversa de RRP + Cuenta TGA)",
+        title="Índice de Liquidez Neta (Inversa de RRP + Cuenta General TGA)",
         template="plotly_dark",
         height=300,
-        yaxis_title="Monto del Índice (Billones $)"
+        yaxis_title="Billones de $"
     )
     st.plotly_chart(fig_liq, use_container_width=True)
-    
-    st.warning("⚠️ **Dinámica Clave de Liquidez (Efecto IntoTheBlock)**: Un descenso en el Reverse Repo (RRP) o en la cuenta general del Tesoro (TGA) representa una liberación masiva de capital hacia el mercado interbancario, lo cual históricamente cataliza rallies en activos de riesgo (como BTC y QQQ) en cuestión de 48-72 horas.")
 
 # -------------------------------------------------------------------
 # TAB 4: BACKTESTING & GESTIÓN DE RIESGO
 # -------------------------------------------------------------------
 with tab4:
-    st.subheader(f"Simulación Histórica: Algoritmo Hibridizado vs. Buy and Hold | Shock: {shock_type}")
+    st.subheader("Backtesting: Algoritmo de Confluencia Híbrido vs. Buy & Hold")
     
-    # Gráfico del Backtest
     fig_bt = go.Figure()
     fig_bt.add_scatter(x=df_results["Date"], y=df_results["Portfolio_Value"], name="Estrategia Algorítmica Híbrida (Velas + Sentimiento + Macro)", line_color="#00ffcc", line_width=2.5)
     fig_bt.add_scatter(x=df_results["Date"], y=df_results["BH_Value"], name="Estrategia Pasiva (Buy & Hold)", line_color="#ff9900", line_dash="dash")
     
     fig_bt.update_layout(
-        title="Curva de Crecimiento de Capital ($10K Inicial)",
+        title="Crecimiento de Capital ($10K Inicial)",
         template="plotly_dark",
         height=400,
         yaxis_title="Valor de Cuenta ($)"
     )
     st.plotly_chart(fig_bt, use_container_width=True)
     
-    # Estadísticas Clave de Rendimiento
+    # Cálculos de Riesgo
     final_algo = df_results["Portfolio_Value"].iloc[-1]
     final_bh = df_results["BH_Value"].iloc[-1]
-    
     ret_algo = ((final_algo - initial_capital) / initial_capital) * 100
     ret_bh = ((final_bh - initial_capital) / initial_capital) * 100
     
-    # Sharpe Ratio estimado
     returns_algo = df_results["Portfolio_Value"].pct_change().dropna()
     returns_bh = df_results["BH_Value"].pct_change().dropna()
     
     sharpe_algo = (returns_algo.mean() / returns_algo.std()) * np.sqrt(365) if returns_algo.std() != 0 else 0
     sharpe_bh = (returns_bh.mean() / returns_bh.std()) * np.sqrt(365) if returns_bh.std() != 0 else 0
     
-    # MÉTRICAS DE RIESGO AVANZADAS
-    # 1. Volatilidad Anualizada del Portafolio
     vol_algo = (returns_algo.std() * np.sqrt(365)) * 100 if len(returns_algo) > 0 else 0.0
     vol_bh = (returns_bh.std() * np.sqrt(365)) * 100 if len(returns_bh) > 0 else 0.0
     
-    # 2. Máximo Drawdown (Max DD)
     def calc_max_dd(val_series):
         cum_max = val_series.cummax()
         dd = (val_series - cum_max) / cum_max
         return dd.min() * 100
-    
     max_dd_algo = calc_max_dd(df_results["Portfolio_Value"])
     max_dd_bh = calc_max_dd(df_results["BH_Value"])
     
-    # 3. Value at Risk (VaR Histórico 95% 1-Día)
     var_95_algo = np.percentile(returns_algo, 5) * 100 if len(returns_algo) > 0 else 0.0
     var_95_bh = np.percentile(returns_bh, 5) * 100 if len(returns_bh) > 0 else 0.0
     
-    # 4. Sortino Ratio (Enfoque en riesgo bajista)
     def calc_sortino(ret_series):
-        if len(ret_series) == 0:
-            return 0.0
+        if len(ret_series) == 0: return 0.0
         mean_ret = ret_series.mean()
         downside = ret_series[ret_series < 0]
-        if len(downside) == 0 or downside.std() == 0:
-            return 0.0
+        if len(downside) == 0 or downside.std() == 0: return 0.0
         return (mean_ret / downside.std()) * np.sqrt(365)
-        
     sortino_algo = calc_sortino(returns_algo)
     sortino_bh = calc_sortino(returns_bh)
     
-    # 5. Calcular curvas de drawdown diarias para graficar
     cum_max_algo = df_results["Portfolio_Value"].cummax()
     dd_algo_curve = (df_results["Portfolio_Value"] - cum_max_algo) / cum_max_algo * 100
     cum_max_bh = df_results["BH_Value"].cummax()
@@ -806,19 +1023,17 @@ with tab4:
     df_results["Drawdown_Algo"] = dd_algo_curve
     df_results["Drawdown_BH"] = dd_bh_curve
     
-    # Renderizar Métricas Principales en Columnas
-    stat_col1, stat_col2, stat_col3 = st.columns(3)
-    with stat_col1:
+    col_s1, col_s2, col_s3 = st.columns(3)
+    with col_s1:
         st.metric("Retorno Algoritmo Híbrido", f"{ret_algo:.2f}%", f"${final_algo:,.2f}")
-    with stat_col2:
+    with col_s2:
         st.metric("Retorno Buy & Hold", f"{ret_bh:.2f}%", f"${final_bh:,.2f}")
-    with stat_col3:
+    with col_s3:
         st.metric("Sharpe Ratio (Híbrido vs B&H)", f"{sharpe_algo:.2f}", f"B&H Sharpe: {sharpe_bh:.2f}")
         
     st.markdown("---")
-    st.subheader(f"🛡️ Reporte Analítico de Control de Riesgo bajo estrés ({shock_type})")
+    st.subheader(f"🛡️ Reporte Analítico de Riesgo | Activo: {selected_asset}")
     
-    # Tabla de métricas cruzadas
     diff_ret = ret_algo - ret_bh
     diff_vol = vol_algo - vol_bh
     diff_sharpe = sharpe_algo - sharpe_bh
@@ -830,7 +1045,7 @@ with tab4:
     <table style="width:100%; border-collapse: collapse; border: 1px solid #2d3748; background-color: #161a23; color: white;">
       <thead>
         <tr style="background-color: #2d3748; border-bottom: 2px solid #00ffcc;">
-          <th style="padding: 12px; text-align: left; font-weight: 600;">Métrica de Rendimiento y Riesgo</th>
+          <th style="padding: 12px; text-align: left; font-weight: 600;">Métrica de Riesgo</th>
           <th style="padding: 12px; text-align: right; font-weight: 600; color: #00ffcc;">Algoritmo Híbrido</th>
           <th style="padding: 12px; text-align: right; font-weight: 600; color: #ff9900;">Pasivo (Buy & Hold)</th>
           <th style="padding: 12px; text-align: center; font-weight: 600;">Alfa / Diferencia de Riesgo</th>
@@ -850,27 +1065,27 @@ with tab4:
           <td style="padding: 12px; text-align: center; font-weight: 700; color: {'#00ffcc' if diff_vol <= 0 else '#ff4d4d'};">{diff_vol:+.2f}% {"(Menor volatilidad)" if diff_vol <= 0 else "(Mayor volatilidad)"}</td>
         </tr>
         <tr style="border-bottom: 1px solid #2d3748;">
-          <td style="padding: 12px; font-weight: 500;">Sharpe Ratio (Retorno/Riesgo Total)</td>
+          <td style="padding: 12px; font-weight: 500;">Sharpe Ratio</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #00ffcc;">{sharpe_algo:.2f}</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff9900;">{sharpe_bh:.2f}</td>
           <td style="padding: 12px; text-align: center; font-weight: 700; color: {'#00ffcc' if diff_sharpe >= 0 else '#ff4d4d'};">{diff_sharpe:+.2f}</td>
         </tr>
         <tr style="border-bottom: 1px solid #2d3748;">
-          <td style="padding: 12px; font-weight: 500;">Sortino Ratio (Retorno/Volatilidad Bajista)</td>
+          <td style="padding: 12px; font-weight: 500;">Sortino Ratio</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #00ffcc;">{sortino_algo:.2f}</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff9900;">{sortino_bh:.2f}</td>
           <td style="padding: 12px; text-align: center; font-weight: 700; color: {'#00ffcc' if diff_sortino >= 0 else '#ff4d4d'};">{diff_sortino:+.2f}</td>
         </tr>
         <tr style="border-bottom: 1px solid #2d3748;">
-          <td style="padding: 12px; font-weight: 500;">Máximo Drawdown (Max DD - Caída Histórica)</td>
+          <td style="padding: 12px; font-weight: 500;">Máximo Drawdown</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff4d4d;">{max_dd_algo:.2f}%</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff4d4d;">{max_dd_bh:.2f}%</td>
-          <td style="padding: 12px; text-align: center; font-weight: 700; color: {'#00ffcc' if max_dd_algo > max_dd_bh else '#ff4d4d'};">{diff_max_dd:+.2f}% {"(Menos caída)" if max_dd_algo > max_dd_bh else "(Mayor caída)"}</td>
+          <td style="padding: 12px; text-align: center; font-weight: 700; color: {'#00ffcc' if max_dd_algo > max_dd_bh else '#ff4d4d'};">{diff_max_dd:+.2f}% {"(Menor caída)" if max_dd_algo > max_dd_bh else "(Mayor caída)"}</td>
         </tr>
         <tr>
           <td style="padding: 12px; font-weight: 500;">Value at Risk (VaR Histórico 95% 1-Día)</td>
           <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff4d4d;">{var_95_algo:.2f}%</td>
-          <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff4d4d;">{var_95_bh:.2f}%</td>
+          <td style="padding: 12px; text-align: right; font-weight: 700; color: #ff9900;">{var_95_bh:.2f}%</td>
           <td style="padding: 12px; text-align: center; font-weight: 700; color: {'#00ffcc' if var_95_algo > var_95_bh else '#ff4d4d'};">{diff_var:+.2f}% {"(Menor pérdida potencial diaria)" if var_95_algo > var_95_bh else "(Mayor pérdida potencial diaria)"}</td>
         </tr>
       </tbody>
@@ -879,17 +1094,15 @@ with tab4:
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Gráfico interactivo de Drawdowns sobre el tiempo
+    # Gráfico de Drawdown de área
     fig_dd = go.Figure()
     fig_dd.add_scatter(x=df_results["Date"], y=df_results["Drawdown_Algo"], name="Drawdown Algoritmo Híbrido", line_color="#ff4d4d", fill="tozeroy")
     fig_dd.add_scatter(x=df_results["Date"], y=df_results["Drawdown_BH"], name="Drawdown Buy & Hold", line_color="#ff9900", line_dash="dash")
     
     fig_dd.update_layout(
-        title="Curva de Pérdida Máxima Diaria en el Tiempo (Drawdown %)",
+        title="Curva de Drawdown Histórico (%)",
         template="plotly_dark",
         height=320,
         yaxis_title="Drawdown (%)"
     )
     st.plotly_chart(fig_dd, use_container_width=True)
-    
-    st.info("💡 **Explicación Analítica de Riesgos**: El **Value at Risk (VaR 95%)** indica la pérdida máxima diaria esperada con un 95% de nivel de confianza. El **Sortino Ratio** complementa al Sharpe ratio ignorando las desviaciones positivas, enfocándose únicamente en la volatilidad dañina de las pérdidas.")
